@@ -13,8 +13,8 @@ app.get('/', (req, res) => {
   res.send('API is running');
 });
 
-app.use('/api/products', require('./routes/productRoutes'));
-app.use('/api/upload', require('./routes/uploadRoutes'));
+app.use('/api/products', require('./routes/Productroutes'));
+app.use('/api/upload', require('./routes/Uploadroutes'));
 app.use('/api/auth', require('./routes/authRoutes'));
 app.use('/api/cart', require('./routes/Cartroutes'));
 app.use('/api/orders', require('./routes/Orderroutes'));
