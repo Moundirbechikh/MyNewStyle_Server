@@ -1,7 +1,7 @@
 const Order = require('../models/Order');
 const Cart = require('../models/Cart');
 const Product = require('../models/Product');
-const transporter = require('../config/email');
+const transporter = require('../config/Email');
 const {
   orderConfirmationEmailTemplate,
   adminOrderNotificationTemplate,
