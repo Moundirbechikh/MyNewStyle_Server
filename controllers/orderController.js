@@ -1,20 +1,75 @@
-const Order = require('../models/Order');
-const Cart = require('../models/Cart');
-const Product = require('../models/Product');
-const transporter = require('../config/Email');
+const Order = require("../models/Order");
+const Cart = require("../models/Cart");
+const Product = require("../models/Product");
+const transporter = require("../config/Email");
 const {
   orderConfirmationEmailTemplate,
   adminOrderNotificationTemplate,
-} = require('../utils/emailTemplates');
+} = require("../utils/emailTemplates");
+
+const sendOrderEmails = async ({
+  order,
+  customerEmail,
+  customerName,
+  telephone,
+  adresseLivraison,
+  ville,
+  notes,
+}) => {
+  const orderId = order._id.toString().slice(-6).toUpperCase();
+  const adminEmail =
+    process.env.ADMIN_EMAIL || process.env.EMAIL_FROM || process.env.EMAIL_USER;
+
+  if (!customerEmail) {
+    throw new Error(
+      "Impossible d’envoyer l’email de confirmation : email client introuvable.",
+    );
+  }
+
+  await transporter.sendMail({
+    from: process.env.EMAIL_FROM,
+    to: customerEmail,
+    subject: `Confirmation de votre commande MyNewStyle #${orderId}`,
+    html: orderConfirmationEmailTemplate({
+      nom: customerName,
+      orderId,
+      items: order.items,
+      total: order.total,
+      adresseLivraison,
+      ville,
+      telephone,
+    }),
+  });
+
+  if (adminEmail) {
+    await transporter.sendMail({
+      from: process.env.EMAIL_FROM,
+      to: adminEmail,
+      subject: `Nouvelle commande #${orderId}`,
+      html: adminOrderNotificationTemplate({
+        nomDestinataire: customerName,
+        email: customerEmail,
+        telephone,
+        items: order.items,
+        total: order.total,
+        adresseLivraison,
+        ville,
+        notes,
+        orderId,
+      }),
+    });
+  }
+};
 
 // POST /api/orders
 const createOrder = async (req, res) => {
   try {
-    const { nomDestinataire, telephone, adresseLivraison, ville, notes } = req.body;
+    const { nomDestinataire, telephone, adresseLivraison, ville, notes } =
+      req.body;
 
     const cart = await Cart.findOne({ user: req.user._id });
     if (!cart || cart.items.length === 0) {
-      return res.status(400).json({ message: 'Votre panier est vide' });
+      return res.status(400).json({ message: "Votre panier est vide" });
     }
 
     const productsCache = {};
@@ -26,11 +81,17 @@ const createOrder = async (req, res) => {
         productsCache[item.product.toString()] = product;
       }
       if (!product) {
-        return res.status(400).json({ message: `Le produit "${item.name}" n'existe plus.` });
+        return res
+          .status(400)
+          .json({ message: `Le produit "${item.name}" n'existe plus.` });
       }
       const colorObj = product.colors.find((c) => c.name === item.color);
       if (!colorObj) {
-        return res.status(400).json({ message: `La couleur "${item.color}" n'est plus disponible pour "${item.name}".` });
+        return res
+          .status(400)
+          .json({
+            message: `La couleur "${item.color}" n'est plus disponible pour "${item.name}".`,
+          });
       }
       const currentStock = colorObj.stockBySize.get(item.size) ?? 0;
       if (currentStock < item.quantity) {
@@ -40,7 +101,10 @@ const createOrder = async (req, res) => {
       }
     }
 
-    const total = cart.items.reduce((sum, item) => sum + item.price * item.quantity, 0);
+    const total = cart.items.reduce(
+      (sum, item) => sum + item.price * item.quantity,
+      0,
+    );
 
     const order = await Order.create({
       user: req.user._id,
@@ -57,57 +121,34 @@ const createOrder = async (req, res) => {
       const product = productsCache[item.product.toString()];
       const colorObj = product.colors.find((c) => c.name === item.color);
       const currentStock = colorObj.stockBySize.get(item.size) ?? 0;
-      colorObj.stockBySize.set(item.size, Math.max(currentStock - item.quantity, 0));
-      product.markModified('colors');
+      colorObj.stockBySize.set(
+        item.size,
+        Math.max(currentStock - item.quantity, 0),
+      );
+      product.markModified("colors");
       await product.save();
     }
 
     cart.items = [];
     await cart.save();
 
+    try {
+      await sendOrderEmails({
+        order,
+        customerEmail: req.user.email,
+        customerName: nomDestinataire,
+        telephone,
+        adresseLivraison,
+        ville,
+        notes,
+      });
+    } catch (emailError) {
+      console.error("❌ Erreur envoi email commande:", emailError.message);
+    }
+
     res.status(201).json(order);
-
-    (async () => {
-      try {
-        const orderId = order._id.toString().slice(-6).toUpperCase();
-
-        await transporter.sendMail({
-          from: process.env.EMAIL_FROM,
-          to: req.user.email,
-          subject: `Confirmation de votre commande MyNewStyle #${orderId}`,
-          html: orderConfirmationEmailTemplate({
-            nom: nomDestinataire,
-            orderId,
-            items: order.items,
-            total,
-            adresseLivraison,
-            ville,
-            telephone,
-          }),
-        });
-
-        await transporter.sendMail({
-          from: process.env.EMAIL_FROM,
-          to: process.env.EMAIL_FROM,
-          subject: `Nouvelle commande #${orderId}`,
-          html: adminOrderNotificationTemplate({
-            nomDestinataire,
-            email: req.user.email,
-            telephone,
-            items: order.items,
-            total,
-            adresseLivraison,
-            ville,
-            notes,
-            orderId,
-          }),
-        });
-      } catch (emailError) {
-        console.error('❌ Erreur envoi email commande:', emailError.message);
-      }
-    })();
   } catch (error) {
-    console.error('Erreur création commande:', error.message);
+    console.error("Erreur création commande:", error.message);
     res.status(400).json({ message: error.message });
   }
 };
@@ -115,7 +156,9 @@ const createOrder = async (req, res) => {
 // GET /api/orders/my-orders
 const getMyOrders = async (req, res) => {
   try {
-    const orders = await Order.find({ user: req.user._id }).sort({ createdAt: -1 });
+    const orders = await Order.find({ user: req.user._id }).sort({
+      createdAt: -1,
+    });
     res.json(orders);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -127,25 +170,27 @@ const getAllOrders = async (req, res) => {
   try {
     const { search, status } = req.query;
     const filter = {};
-    if (status && status !== 'all') filter.statut = status;
+    if (status && status !== "all") filter.statut = status;
 
-    let orders = await Order.find(filter).populate('user', 'nom email').sort({ createdAt: -1 });
+    let orders = await Order.find(filter)
+      .populate("user", "nom email")
+      .sort({ createdAt: -1 });
 
-    if (search && search.trim() !== '') {
+    if (search && search.trim() !== "") {
       const term = search.trim().toLowerCase();
       orders = orders.filter(
         (o) =>
           o._id.toString().toLowerCase().includes(term) ||
           o.nomDestinataire.toLowerCase().includes(term) ||
-          (o.user?.nom || '').toLowerCase().includes(term) ||
-          (o.user?.email || '').toLowerCase().includes(term) ||
-          o.items.some((item) => item.name.toLowerCase().includes(term))
+          (o.user?.nom || "").toLowerCase().includes(term) ||
+          (o.user?.email || "").toLowerCase().includes(term) ||
+          o.items.some((item) => item.name.toLowerCase().includes(term)),
       );
     }
 
     res.json(orders);
   } catch (error) {
-    console.error('Erreur getAllOrders:', error);
+    console.error("Erreur getAllOrders:", error);
     res.status(500).json({ message: error.message });
   }
 };
@@ -154,14 +199,31 @@ const getAllOrders = async (req, res) => {
 // query optionnel : ?year=2026
 const getOrderStats = async (req, res) => {
   try {
-    const requestedYear = req.query.year ? Number(req.query.year) : new Date().getFullYear();
+    const requestedYear = req.query.year
+      ? Number(req.query.year)
+      : new Date().getFullYear();
     const allOrders = await Order.find();
 
-    const yearsSet = new Set(allOrders.map((o) => new Date(o.createdAt).getFullYear()));
+    const yearsSet = new Set(
+      allOrders.map((o) => new Date(o.createdAt).getFullYear()),
+    );
     yearsSet.add(new Date().getFullYear()); // l'année en cours est toujours disponible
     const availableYears = Array.from(yearsSet).sort((a, b) => b - a);
 
-    const monthLabels = ['Jan', 'Fév', 'Mar', 'Avr', 'Mai', 'Juin', 'Juil', 'Août', 'Sep', 'Oct', 'Nov', 'Déc'];
+    const monthLabels = [
+      "Jan",
+      "Fév",
+      "Mar",
+      "Avr",
+      "Mai",
+      "Juin",
+      "Juil",
+      "Août",
+      "Sep",
+      "Oct",
+      "Nov",
+      "Déc",
+    ];
 
     const monthly = Array.from({ length: 12 }, (_, i) => ({
       month: i + 1,
@@ -184,8 +246,8 @@ const getOrderStats = async (req, res) => {
       const d = new Date(order.createdAt);
       const y = d.getFullYear();
       const m = d.getMonth();
-      const isCancelled = order.statut === 'annulee';
-      const isReturned = order.statut === 'retournee';
+      const isCancelled = order.statut === "annulee";
+      const isReturned = order.statut === "retournee";
       const countsAsRevenue = !isCancelled && !isReturned;
 
       if (y === requestedYear) {
@@ -217,8 +279,8 @@ const getOrderStats = async (req, res) => {
       allOrders.forEach((order) => {
         if (new Date(order.createdAt).getFullYear() === year) {
           orders += 1;
-          const isCancelled = order.statut === 'annulee';
-          const isReturned = order.statut === 'retournee';
+          const isCancelled = order.statut === "annulee";
+          const isReturned = order.statut === "retournee";
           if (isCancelled) cancelled += 1;
           if (isReturned) returned += 1;
           if (!isCancelled && !isReturned) revenue += order.total;
@@ -231,7 +293,10 @@ const getOrderStats = async (req, res) => {
     let worstMonth = null;
     monthly.forEach((m) => {
       const issues = m.cancelled + m.returned;
-      if (issues > 0 && (!worstMonth || issues > worstMonth.cancelled + worstMonth.returned)) {
+      if (
+        issues > 0 &&
+        (!worstMonth || issues > worstMonth.cancelled + worstMonth.returned)
+      ) {
         worstMonth = m;
       }
     });
@@ -240,13 +305,18 @@ const getOrderStats = async (req, res) => {
       year: requestedYear,
       availableYears,
       monthly,
-      yearlyTotal: { revenue: yearlyRevenue, orders: yearlyOrders, cancelled: yearlyCancelled, returned: yearlyReturned },
+      yearlyTotal: {
+        revenue: yearlyRevenue,
+        orders: yearlyOrders,
+        cancelled: yearlyCancelled,
+        returned: yearlyReturned,
+      },
       currentMonth,
       yearlyBreakdown,
       worstMonth,
     });
   } catch (error) {
-    console.error('Erreur getOrderStats:', error);
+    console.error("Erreur getOrderStats:", error);
     res.status(500).json({ message: error.message });
   }
 };
@@ -255,21 +325,30 @@ const getOrderStats = async (req, res) => {
 const updateOrderStatus = async (req, res) => {
   try {
     const { statut } = req.body;
-    const validStatuses = ['en_attente', 'confirmee', 'expediee', 'livree', 'annulee', 'retournee'];
+    const validStatuses = [
+      "en_attente",
+      "confirmee",
+      "expediee",
+      "livree",
+      "annulee",
+      "retournee",
+    ];
 
     if (!validStatuses.includes(statut)) {
-      return res.status(400).json({ message: 'Statut invalide' });
+      return res.status(400).json({ message: "Statut invalide" });
     }
 
-    const order = await Order.findByIdAndUpdate(req.params.id, { statut }, { new: true }).populate(
-      'user',
-      'nom email'
-    );
-    if (!order) return res.status(404).json({ message: 'Commande non trouvée' });
+    const order = await Order.findByIdAndUpdate(
+      req.params.id,
+      { statut },
+      { new: true },
+    ).populate("user", "nom email");
+    if (!order)
+      return res.status(404).json({ message: "Commande non trouvée" });
 
     res.json(order);
   } catch (error) {
-    console.error('Erreur updateOrderStatus:', error);
+    console.error("Erreur updateOrderStatus:", error);
     res.status(400).json({ message: error.message });
   }
 };
@@ -277,11 +356,18 @@ const updateOrderStatus = async (req, res) => {
 // GET /api/orders/:id
 const getOrderById = async (req, res) => {
   try {
-    const order = await Order.findById(req.params.id).populate('user', 'nom email');
-    if (!order) return res.status(404).json({ message: 'Commande non trouvée' });
+    const order = await Order.findById(req.params.id).populate(
+      "user",
+      "nom email",
+    );
+    if (!order)
+      return res.status(404).json({ message: "Commande non trouvée" });
 
-    if (order.user._id.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
-      return res.status(403).json({ message: 'Accès refusé' });
+    if (
+      order.user._id.toString() !== req.user._id.toString() &&
+      req.user.role !== "admin"
+    ) {
+      return res.status(403).json({ message: "Accès refusé" });
     }
 
     res.json(order);
