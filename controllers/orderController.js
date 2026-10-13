@@ -67,8 +67,15 @@ const createOrder = async (req, res) => {
     const { nomDestinataire, telephone, adresseLivraison, ville, notes } =
       req.body;
 
+    console.log("🧾 Début création commande", {
+      userId: req.user?._id,
+      email: req.user?.email,
+      itemsCount: req.body?.items?.length || "cart",
+    });
+
     const cart = await Cart.findOne({ user: req.user._id });
     if (!cart || cart.items.length === 0) {
+      console.log("❌ Commande refusée: panier vide");
       return res.status(400).json({ message: "Votre panier est vide" });
     }
 
@@ -81,12 +88,17 @@ const createOrder = async (req, res) => {
         productsCache[item.product.toString()] = product;
       }
       if (!product) {
+        console.log(
+          "❌ Produit introuvable au moment de la commande:",
+          item.product,
+        );
         return res
           .status(400)
           .json({ message: `Le produit "${item.name}" n'existe plus.` });
       }
       const colorObj = product.colors.find((c) => c.name === item.color);
       if (!colorObj) {
+        console.log("❌ Couleur indisponible:", item.color, "pour", item.name);
         return res
           .status(400)
           .json({
@@ -95,6 +107,13 @@ const createOrder = async (req, res) => {
       }
       const currentStock = colorObj.stockBySize.get(item.size) ?? 0;
       if (currentStock < item.quantity) {
+        console.log("❌ Stock insuffisant:", {
+          product: item.name,
+          color: item.color,
+          size: item.size,
+          currentStock,
+          requested: item.quantity,
+        });
         return res.status(400).json({
           message: `Stock insuffisant pour "${item.name}" (${item.color}, taille ${item.size}). Il ne reste que ${currentStock} en stock.`,
         });
@@ -105,6 +124,110 @@ const createOrder = async (req, res) => {
       (sum, item) => sum + item.price * item.quantity,
       0,
     );
+
+    console.log(
+      "📧 Tentative d’envoi des emails avant enregistrement commande...",
+    );
+    try {
+      await sendOrderEmails({
+        order: {
+          _id: "TMP_ORDER",
+          items: cart.items,
+          total,
+        },
+        customerEmail: req.user.email,
+        customerName: nomDestinataire,
+        telephone,
+        adresseLivraison,
+        ville,
+        notes,
+      });
+      console.log(
+        "✅ Emails envoyés avec succès, création de la commande en base...",
+      );
+    } catch (emailError) {
+      console.error(
+        "❌ Erreur envoi email avant création commande:",
+        emailError.message,
+      );
+      return res.status(400).json({
+        message:
+          "La commande n’a pas pu être validée car l’email de confirmation n’a pas pu être envoyé. Aucune commande n’a été enregistrée.",
+      });
+    }
+
+    const order = await Order.create({
+      user: req.user._id,
+      items: cart.items,
+      total,
+      nomDestinataire,
+      telephone,
+      adresseLivraison,
+      ville,
+      notes,
+    });
+
+    console.log("✅ Commande enregistrée en base:", order._id);
+
+    for (const item of cart.items) {
+      const product = productsCache[item.product.toString()];
+      const colorObj = product.colors.find((c) => c.name === item.color);
+      const currentStock = colorObj.stockBySize.get(item.size) ?? 0;
+      colorObj.stockBySize.set(
+        item.size,
+        Math.max(currentStock - item.quantity, 0),
+      );
+      product.markModified("colors");
+      await product.save();
+    }
+
+    cart.items = [];
+    await cart.save();
+
+    console.log("🛒 Panier vidé après commande OK");
+    res.status(201).json(order);
+  } catch (error) {
+    console.error("Erreur création commande:", error.message);
+    res.status(400).json({ message: error.message });
+  }
+};
+
+/*
+Ancienne logique remplacée :
+
+const createOrder = async (req, res) => {
+  try {
+    const { nomDestinataire, telephone, adresseLivraison, ville, notes } = req.body;
+
+    const cart = await Cart.findOne({ user: req.user._id });
+    if (!cart || cart.items.length === 0) {
+      return res.status(400).json({ message: 'Votre panier est vide' });
+    }
+
+    const productsCache = {};
+
+    for (const item of cart.items) {
+      let product = productsCache[item.product.toString()];
+      if (!product) {
+        product = await Product.findById(item.product);
+        productsCache[item.product.toString()] = product;
+      }
+      if (!product) {
+        return res.status(400).json({ message: `Le produit "${item.name}" n'existe plus.` });
+      }
+      const colorObj = product.colors.find((c) => c.name === item.color);
+      if (!colorObj) {
+        return res.status(400).json({ message: `La couleur "${item.color}" n'est plus disponible pour "${item.name}".` });
+      }
+      const currentStock = colorObj.stockBySize.get(item.size) ?? 0;
+      if (currentStock < item.quantity) {
+        return res.status(400).json({
+          message: `Stock insuffisant pour "${item.name}" (${item.color}, taille ${item.size}). Il ne reste que ${currentStock} en stock.`,
+        });
+      }
+    }
+
+    const total = cart.items.reduce((sum, item) => sum + item.price * item.quantity, 0);
 
     const order = await Order.create({
       user: req.user._id,
@@ -121,11 +244,8 @@ const createOrder = async (req, res) => {
       const product = productsCache[item.product.toString()];
       const colorObj = product.colors.find((c) => c.name === item.color);
       const currentStock = colorObj.stockBySize.get(item.size) ?? 0;
-      colorObj.stockBySize.set(
-        item.size,
-        Math.max(currentStock - item.quantity, 0),
-      );
-      product.markModified("colors");
+      colorObj.stockBySize.set(item.size, Math.max(currentStock - item.quantity, 0));
+      product.markModified('colors');
       await product.save();
     }
 
@@ -143,15 +263,16 @@ const createOrder = async (req, res) => {
         notes,
       });
     } catch (emailError) {
-      console.error("❌ Erreur envoi email commande:", emailError.message);
+      console.error('❌ Erreur envoi email commande:', emailError.message);
     }
 
     res.status(201).json(order);
   } catch (error) {
-    console.error("Erreur création commande:", error.message);
+    console.error('Erreur création commande:', error.message);
     res.status(400).json({ message: error.message });
   }
 };
+*/
 
 // GET /api/orders/my-orders
 const getMyOrders = async (req, res) => {
